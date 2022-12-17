@@ -31,6 +31,7 @@ Allow root ssh login = no
 What timezone = US/Mountain
 Which disk = wd0
 Use (W)hole disk MBR, whole disk (G)PT, (O)penBSD area or (E)dit? = whole
+Use (W)hole disk, use the (O)penBSD area or (E)dit the MBR? = whole
 Use (A)uto layout, (E)dit auto layout, or create (C)ustom layout = auto
 URL to autopartitioning template for disklabel = http://10.0.2.2:25706/disklabel
 Location of sets = http
