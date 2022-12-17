@@ -151,7 +151,7 @@ func (o *OpenBSD) Build(dest, ver, smushVer string) error {
 		}
 
 		if r.Method == "POST" {
-			out, err := os.Create(path.Join(outDir, "sys.diff"))
+			out, err := os.Create(path.Join(outDir, "sys.diff.b64"))
 			if err != nil {
 				http.Error(w, "Error reading request body",
 					http.StatusInternalServerError)
@@ -205,8 +205,12 @@ func (o *OpenBSD) Build(dest, ver, smushVer string) error {
 		30*time.Minute,
 		expect.Tee(os.Stdout),
 	)
+	if err != nil {
+		return err
+	}
+	defer qemucmd.Close()
 
-	_, err = qemucmd.ExpectBatch([]expect.Batcher{
+	_, _ = qemucmd.ExpectBatch([]expect.Batcher{
 		&expect.BExp{R: "boot>$"},
 		&expect.BSnd{S: "set tty com0\n"},
 		&expect.BExp{R: "boot>"},
@@ -230,18 +234,14 @@ func (o *OpenBSD) Build(dest, ver, smushVer string) error {
 		&expect.BExp{R: "buildlet\\$"},
 		&expect.BSnd{S: fmt.Sprintf("env GOOS=openbsd GOARCH=%s ./mkall.sh\n", archMap[o.arch])},
 		&expect.BExp{R: "buildlet\\$"},
-		&expect.BSnd{S: "git diff >/tmp/sys.diff\n"},
+		&expect.BSnd{S: fmt.Sprintf("env GOOS=openbsd GOARCH=%s go test ./...\n", archMap[o.arch])},
 		&expect.BExp{R: "buildlet\\$"},
-		&expect.BSnd{S: "curl -d @/tmp/sys.diff http://10.0.2.2:25706/\n"},
+		&expect.BSnd{S: "git diff | openssl enc -base64 >/tmp/sys.diff.b64\n"},
+		&expect.BExp{R: "buildlet\\$"},
+		&expect.BSnd{S: "curl -d @/tmp/sys.diff.b64 http://10.0.2.2:25706/\n"},
 		&expect.BExp{R: "buildlet\\$"},
 		&expect.BSnd{S: "\n"},
 	}, 30*time.Minute)
-
-	if err != nil {
-		return err
-	}
-
-	defer qemucmd.Close()
 
 	return nil
 }

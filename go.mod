@@ -1,4 +1,4 @@
-module goru
+module github.com/qbit/goru
 
 go 1.19
 
