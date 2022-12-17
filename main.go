@@ -14,7 +14,6 @@ import (
 	"time"
 
 	expect "github.com/google/goexpect"
-	"golang.org/x/term"
 )
 
 const responseFile = `System hostname = buildlet
@@ -53,6 +52,18 @@ var archMap = map[string]string{
 	"octeon":  "mips64",
 	"armv7":   "arm",
 	"riscv64": "riscv64",
+}
+
+type nwc struct {
+}
+
+func (n nwc) Write(p []byte) (int, error) {
+	fmt.Print(string(p))
+	return len(p), nil
+}
+
+func (n nwc) Close() error {
+	return nil
 }
 
 type setList []string
@@ -123,13 +134,6 @@ func (o *OpenBSD) Verify(dest, ver, smushVer string) error {
 
 func (o *OpenBSD) Build(dest, ver, smushVer string) error {
 	outDir := path.Join(dest, o.arch)
-
-	fd := int(os.Stdin.Fd())
-	oldState, err := term.MakeRaw(fd)
-	if err != nil {
-		return err
-	}
-	defer term.Restore(fd, oldState)
 
 	fileServer := http.FileServer(http.Dir(outDir))
 	mux := http.NewServeMux()
@@ -204,7 +208,7 @@ func (o *OpenBSD) Build(dest, ver, smushVer string) error {
 	qemucmd, _, err := expect.SpawnWithArgs(
 		o.qemuCmd,
 		30*time.Minute,
-		expect.Tee(os.Stdout),
+		expect.Tee(nwc{}),
 	)
 	if err != nil {
 		return err
