@@ -1,6 +1,7 @@
 package main
 
 import (
+	"embed"
 	"fmt"
 	"io"
 	"log"
@@ -16,30 +17,10 @@ import (
 	expect "github.com/google/goexpect"
 )
 
-const responseFile = `System hostname = buildlet
-Which network interface = em0
-IPv4 address for em0 = dhcp
-Password for root account = root
-Do you expect to run the X Window System = no
-Change the default console to com0 = yes
-Which speed should com0 use = 115200
-Setup a user = gopher
-Full name for user gopher = Gopher Gopherson
-Password for user gopher = gopher
-Allow root ssh login = no
-What timezone = US/Mountain
-Which disk = wd0
-Use (W)hole disk MBR, whole disk (G)PT, (O)penBSD area or (E)dit? = whole
-Use (W)hole disk, use the (O)penBSD area or (E)dit the MBR? = whole
-Use (A)uto layout, (E)dit auto layout, or create (C)ustom layout = auto
-URL to autopartitioning template for disklabel = http://10.0.2.2:25706/disklabel
-Location of sets = http
-http server? = 10.0.2.2:25706
-server directory? = /pub
-Set name(s) = +* -x* -game* -man* +xbase* +site*-buildlet.tgz done
-Directory does not contain SHA256.sig. Continue without verification = yes`
+//go:embed autoinstall
+var aiFS embed.FS
 
-const diskLayout = `/	5G-*	95%%
+const diskLayout = `/	5G-*	95%
 swap	1G
 `
 
@@ -54,8 +35,7 @@ var archMap = map[string]string{
 	"riscv64": "riscv64",
 }
 
-type nwc struct {
-}
+type nwc struct{}
 
 func (n nwc) Write(p []byte) (int, error) {
 	fmt.Print(string(p))
@@ -95,10 +75,11 @@ func newSetList(sv string) setList {
 }
 
 type OpenBSD struct {
-	arch    string   // arm64
-	pkgArch string   // aarch64
-	qemuCmd []string // qemu-system-aarch64 .....
-	sets    setList
+	arch     string   // arm64
+	pkgArch  string   // aarch64
+	qemuCmd  []string // qemu-system-aarch64 .....
+	sets     setList
+	instScpt string
 }
 
 func (o *OpenBSD) Verify(dest, ver, smushVer string) error {
@@ -108,24 +89,22 @@ func (o *OpenBSD) Verify(dest, ver, smushVer string) error {
 	}
 	outDir := path.Join(dest, o.arch)
 	for _, file := range o.sets {
-		if _, err := os.Stat(file); !os.IsNotExist(err) {
-			if file == "SHA256" || file == "SHA256.sig" {
-				continue
-			}
-			fmt.Printf("\tverifying %s\n", file)
-			cmd := exec.Command(
-				sig,
-				"-C",
-				"-p",
-				fmt.Sprintf("/etc/signify/openbsd-%s-base.pub", smushVer),
-				"-x",
-				"SHA256.sig",
-				file,
-			)
-			cmd.Dir = outDir
-			if out, err := cmd.Output(); err != nil {
-				return fmt.Errorf("verification of %q failed!\n%s\n%s", file, out, err)
-			}
+		if file == "SHA256" || file == "SHA256.sig" || file == "index.txt" {
+			continue
+		}
+		fmt.Printf("\tverifying %s\n", file)
+		cmd := exec.Command(
+			sig,
+			"-C",
+			"-p",
+			fmt.Sprintf("/etc/signify/openbsd-%s-base.pub", smushVer),
+			"-x",
+			"SHA256.sig",
+			file,
+		)
+		cmd.Dir = outDir
+		if out, err := cmd.Output(); err != nil {
+			return fmt.Errorf("verification of %q failed!\n%s\n%s", file, out, err)
 		}
 
 	}
@@ -140,11 +119,11 @@ func (o *OpenBSD) Build(dest, ver, smushVer string) error {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			if r.URL.Path == "/disklabel" {
-				fmt.Fprintf(w, diskLayout)
+				fmt.Fprint(w, diskLayout)
 				return
 			}
 			if r.URL.Path == "/install.conf" {
-				fmt.Fprintf(w, responseFile)
+				fmt.Fprint(w, o.instScpt)
 				return
 			}
 			if strings.HasPrefix(r.URL.Path, "/pub") {
@@ -166,7 +145,7 @@ func (o *OpenBSD) Build(dest, ver, smushVer string) error {
 
 			_, err = io.Copy(out, r.Body)
 			if err != nil {
-				http.Error(w, "Error reading request body",
+				http.Error(w, "Error writing request body",
 					http.StatusInternalServerError)
 				return
 			}
@@ -190,7 +169,7 @@ func (o *OpenBSD) Build(dest, ver, smushVer string) error {
 		"raw",
 		"-o", "preallocation=full",
 		"disk.raw",
-		"10G",
+		"10240M",
 	)
 	imgcmd.Dir = outDir
 	if out, err := imgcmd.Output(); err != nil {
@@ -207,7 +186,7 @@ func (o *OpenBSD) Build(dest, ver, smushVer string) error {
 
 	qemucmd, _, err := expect.SpawnWithArgs(
 		o.qemuCmd,
-		30*time.Minute,
+		1*time.Hour,
 		expect.Tee(nwc{}),
 	)
 	if err != nil {
@@ -309,6 +288,14 @@ func usage() {
 	os.Exit(1)
 }
 
+func readAI(name string) string {
+	s, err := aiFS.ReadFile(path.Join("autoinstall", name))
+	if err != nil {
+		log.Fatal(err)
+	}
+	return string(s)
+}
+
 func main() {
 	if len(os.Args) != 2 {
 		usage()
@@ -323,27 +310,34 @@ func main() {
 	}
 
 	sets := Sets{
+		//{
+		//	arch:     "arm64",
+		//	pkgArch:  "aarch64",
+		//	sets:     newSetList(smushVer),
+		//	instScpt: readAI("arm64-autoinstall.conf"),
+		//	qemuCmd: []string{
+		//		"qemu-system-aarch64",
+		//		"-M", "virt",
+		//		"-nographic",
+		//		"-cpu", "cortex-a57",
+		//		"-m", "2048",
+		//		"-smp", "4",
+		//		"-net", "nic,model=e1000",
+		//		"-net", "user",
+		//		"-drive",
+		//		fmt.Sprintf("file=%s,format=raw", path.Join(dest, "arm64", "disk.raw")),
+		//	},
+		//},
 		{
-			arch:    "arm64",
-			pkgArch: "aarch64",
-			sets:    newSetList(smushVer),
-			qemuCmd: []string{
-				"qemu-system-aarch64",
-				"-nographic",
-				"-m", "2048",
-				"-net", "nic,model=e1000",
-				"-drive",
-				fmt.Sprintf("file=%s,format=raw", path.Join(dest, "amd64", "disk.raw")),
-			},
-		},
-		{
-			arch:    "amd64",
-			pkgArch: "amd64",
-			sets:    newSetList(smushVer),
+			arch:     "amd64",
+			pkgArch:  "amd64",
+			sets:     newSetList(smushVer),
+			instScpt: readAI("amd64-autoinstall.conf"),
 			qemuCmd: []string{
 				"qemu-system-x86_64",
 				"-nographic",
 				"-m", "2048",
+				"-smp", "4",
 				"-net", "nic,model=e1000",
 				"-net", "user",
 				"-drive",
@@ -351,61 +345,67 @@ func main() {
 			},
 		},
 		{
-			arch:    "i386",
-			pkgArch: "i386",
-			sets:    newSetList(smushVer),
+			arch:     "i386",
+			pkgArch:  "i386",
+			sets:     newSetList(smushVer),
+			instScpt: readAI("i386-autoinstall.conf"),
 			qemuCmd: []string{
 				"qemu-system-i386",
 				"-nographic",
 				"-m", "2048",
+				"-smp", "4",
 				"-net", "nic,model=e1000",
 				"-net", "user",
 				"-drive",
 				fmt.Sprintf("file=%s,format=raw", path.Join(dest, "i386", "disk.raw")),
 			},
 		},
-		{
-			arch:    "octeon",
-			pkgArch: "mips64",
-			sets:    newSetList(smushVer),
-			qemuCmd: []string{
-				"qemu-system-mips64",
-				"-nographic",
-				"-m", "2048",
-				"-net", "nic,model=e1000",
-				"-net", "user",
-				"-drive",
-				fmt.Sprintf("file=%s,format=raw", path.Join(dest, "mips64", "disk.raw")),
-			},
-		},
-		{
-			arch:    "armv7",
-			pkgArch: "arm",
-			sets:    newSetList(smushVer),
-			qemuCmd: []string{
-				"qemu-system-arm",
-				"-nographic",
-				"-m", "2048",
-				"-net", "nic,model=e1000",
-				"-net", "user",
-				"-drive",
-				fmt.Sprintf("file=%s,format=raw", path.Join(dest, "armv7", "disk.raw")),
-			},
-		},
-		{
-			arch:    "riscv64",
-			pkgArch: "riscv64",
-			sets:    newSetList(smushVer),
-			qemuCmd: []string{
-				"qemu-system-riscv64",
-				"-nographic",
-				"-m", "2048",
-				"-net", "nic,model=e1000",
-				"-net", "user",
-				"-drive",
-				fmt.Sprintf("file=%s,format=raw", path.Join(dest, "riscv64", "disk.raw")),
-			},
-		},
+		//{
+		//	arch:     "octeon",
+		//	pkgArch:  "mips64",
+		//	sets:     newSetList(smushVer),
+		//	instScpt: readAI("octeon-autoinstall.conf"),
+		//	qemuCmd: []string{
+		//		"qemu-system-mips64",
+		//		"-nographic",
+		//		"-m", "2048",
+		//		"-smp", "4",
+		//		"-net", "nic,model=e1000",
+		//		"-net", "user",
+		//		"-drive",
+		//		fmt.Sprintf("file=%s,format=raw", path.Join(dest, "octeon", "disk.raw")),
+		//	},
+		//},
+		//{
+		//	arch:     "armv7",
+		//	pkgArch:  "arm",
+		//	sets:     newSetList(smushVer),
+		//	instScpt: readAI("armv7-autoinstall.conf"),
+		//	qemuCmd: []string{
+		//		"qemu-system-arm",
+		//		"-nographic",
+		//		"-m", "2048",
+		//		"-net", "nic,model=e1000",
+		//		"-net", "user",
+		//		"-drive",
+		//		fmt.Sprintf("file=%s,format=raw", path.Join(dest, "armv7", "disk.raw")),
+		//	},
+		//},
+		//{
+		//	arch:     "riscv64",
+		//	pkgArch:  "riscv64",
+		//	sets:     newSetList(smushVer),
+		//	instScpt: readAI("riscv64-autoinstall.conf"),
+		//	qemuCmd: []string{
+		//		"qemu-system-riscv64",
+		//		"-nographic",
+		//		"-m", "2048",
+		//		"-net", "nic,model=e1000",
+		//		"-net", "user",
+		//		"-drive",
+		//		fmt.Sprintf("file=%s,format=raw", path.Join(dest, "riscv64", "disk.raw")),
+		//	},
+		//},
 	}
 
 	sets.Sort()

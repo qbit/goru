@@ -6,5 +6,8 @@ pkgs.mkShell {
     gopls
     go-tools
     qemu
+    OVMFFull
+    OVMF
+    netcat
   ];
 }
